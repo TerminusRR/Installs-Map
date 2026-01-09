@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Installs Map (Mapbox)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Mapbox GL JS -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+  <style>
+    body { margin: 0; padding: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    .legend {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      background: rgba(255,255,255,0.92);
+      padding: 10px 12px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+      max-width: 280px;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .legend h3 { margin: 0 0 6px 0; font-size: 14px; }
+    .legend .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.25); }
+    .topbar {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      background: rgba(255,255,255,0.92);
+      padding: 10px 12px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .topbar input, .topbar select {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(0,0,0,0.18);
+      font-size: 13px;
+    }
+    .pill { padding: 6px 10px; border-radius: 999px; background: rgba(0,0,0,0.05); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="topbar">
+    <div class="pill"><strong>Installs</strong> • click a dot to view details</div>
+    <label>Year:
+      <select id="yearFilter">
+        <option value="ALL">All</option>
+      </select>
+    </label>
+    <label>Search:
+      <input id="searchBox" type="text" placeholder="Name, address, city, phone…" size="28" />
+    </label>
+    <div id="count" class="pill">Loading…</div>
+  </div>
+
+  <div class="legend" id="legend" style="display:none;"></div>
+
+  <script>
+    // 1) Paste your Mapbox token below:
+    mapboxgl.accessToken = (window.MAPBOX_TOKEN || "pk.eyJ1IjoidGVybWludXNyciIsImEiOiJjbWs2eDNraGwweHd4M2Zwd2QzemhrMHlwIn0.nWAJ0k2C4DAQlI1l7cFIYA");
+
+    const GEOJSON_URL = "installs.geojson"; // output of the python geocoding script
+
+    const palette = [
+      "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+      "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"
+    ];
+
+    function buildPopupHTML(props) {
+      // Pretty key/value table. Show all properties.
+      const keys = Object.keys(props);
+      keys.sort((a,b) => a.localeCompare(b));
+      let rows = "";
+      for (const k of keys) {
+        const v = (props[k] === null || props[k] === undefined) ? "" : String(props[k]);
+        rows += `<tr><td style="padding:4px 8px; font-weight:600; vertical-align:top; border-top:1px solid rgba(0,0,0,0.08);">${k}</td>
+                 <td style="padding:4px 8px; border-top:1px solid rgba(0,0,0,0.08);">${v}</td></tr>`;
+      }
+      return `<div style="max-width:360px;">
+        <div style="font-weight:800; font-size:14px; margin-bottom:6px;">${props["Job Name"] || "Install"}</div>
+        <div style="font-size:13px; margin-bottom:8px;">${props["Full Address"] || ""}</div>
+        <table style="border-collapse:collapse; width:100%; font-size:12px;">${rows}</table>
+      </div>`;
+    }
+
+    async function loadGeoJSON() {
+      const res = await fetch(GEOJSON_URL, {cache: "no-store"});
+      if (!res.ok) throw new Error(`Failed to load ${GEOJSON_URL}: ${res.status}`);
+      return await res.json();
+    }
+
+    function uniqueYears(fc) {
+      const set = new Set();
+      for (const f of fc.features) {
+        const y = f.properties && f.properties["Completed Year"];
+        if (y !== null && y !== undefined && y !== "" && !Number.isNaN(Number(y))) {
+          set.add(Number(y));
+        }
+      }
+      return Array.from(set).sort((a,b)=>a-b);
+    }
+
+    function buildYearColorMap(years) {
+      const map = new Map();
+      years.forEach((y, i) => map.set(y, palette[i % palette.length]));
+      return map;
+    }
+
+    function buildLegendHTML(yearColor) {
+      let html = `<h3>Pin colors by year</h3>`;
+      for (const [y, c] of yearColor.entries()) {
+        html += `<div class="row"><span class="swatch" style="background:${c}"></span><span>${y}</span></div>`;
+      }
+      return html;
+    }
+
+    function buildMatchExpression(yearColor) {
+      // ["match", ["to-number", ["get","Completed Year"]], 2024, "#...", 2023, "#...", "#default"]
+      const expr = ["match", ["to-number", ["get","Completed Year"]]];
+      for (const [y, c] of yearColor.entries()) {
+        expr.push(y);
+        expr.push(c);
+      }
+      expr.push("#3b82f6"); // default
+      return expr;
+    }
+
+    function normalize(s) {
+      return (s || "").toString().toLowerCase();
+    }
+
+    function featureMatchesSearch(f, q) {
+      if (!q) return true;
+      const props = f.properties || {};
+      const hay = Object.values(props).map(v => normalize(v)).join(" | ");
+      return hay.includes(q);
+    }
+
+    function applyFilters(map, fc, yearFilter, searchQ) {
+      const q = normalize(searchQ);
+      const yf = yearFilter === "ALL" ? null : Number(yearFilter);
+
+      const filtered = {
+        type: "FeatureCollection",
+        features: fc.features.filter(f => {
+          const y = Number((f.properties || {})["Completed Year"]);
+          const yearOk = (yf === null) ? true : (y === yf);
+          const searchOk = featureMatchesSearch(f, q);
+          return yearOk && searchOk;
+        })
+      };
+
+      map.getSource("installs").setData(filtered);
+      document.getElementById("count").textContent = `${filtered.features.length} pins shown`;
+    }
+
+    (async () => {
+      const fc = await loadGeoJSON();
+      const years = uniqueYears(fc);
+      const yearColor = buildYearColorMap(years);
+
+      // Populate year filter
+      const yearSelect = document.getElementById("yearFilter");
+      for (const y of years) {
+        const opt = document.createElement("option");
+        opt.value = String(y);
+        opt.textContent = String(y);
+        yearSelect.appendChild(opt);
+      }
+
+      // Legend
+      const legend = document.getElementById("legend");
+      legend.innerHTML = buildLegendHTML(yearColor);
+      legend.style.display = "block";
+
+      // Init map around the data bounds
+      const coords = fc.features.map(f => f.geometry.coordinates);
+      let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+      for (const [x,y] of coords) { minX=Math.min(minX,x); minY=Math.min(minY,y); maxX=Math.max(maxX,x); maxY=Math.max(maxY,y); }
+      const bounds = [[minX, minY], [maxX, maxY]];
+
+      const map = new mapboxgl.Map({
+        container: "map",
+        style: "mapbox://styles/mapbox/streets-v12",
+        center: [-84.39, 33.75],
+        zoom: 9
+      });
+
+      map.addControl(new mapboxgl.NavigationControl(), "bottom-right");
+
+      map.on("load", () => {
+        map.addSource("installs", { type: "geojson", data: fc });
+
+        map.addLayer({
+          id: "installs-points",
+          type: "circle",
+          source: "installs",
+          paint: {
+            "circle-radius": 6,
+            "circle-color": buildMatchExpression(yearColor),
+            "circle-stroke-color": "rgba(0,0,0,0.35)",
+            "circle-stroke-width": 1,
+            "circle-opacity": 0.9
+          }
+        });
+
+        // Fit to bounds if we have data
+        if (coords.length > 0 && isFinite(minX)) {
+          map.fitBounds(bounds, { padding: 60, maxZoom: 12 });
+        }
+
+        // Click popup
+        map.on("click", "installs-points", (e) => {
+          const f = e.features && e.features[0];
+          if (!f) return;
+          const html = buildPopupHTML(f.properties || {});
+          new mapboxgl.Popup({ maxWidth: "420px" })
+            .setLngLat(e.lngLat)
+            .setHTML(html)
+            .addTo(map);
+        });
+
+        // Cursor
+        map.on("mouseenter", "installs-points", () => map.getCanvas().style.cursor = "pointer");
+        map.on("mouseleave", "installs-points", () => map.getCanvas().style.cursor = "");
+
+        // Filters
+        const searchBox = document.getElementById("searchBox");
+        const countEl = document.getElementById("count");
+        countEl.textContent = `${fc.features.length} pins shown`;
+
+        function refresh() {
+          applyFilters(map, fc, yearSelect.value, searchBox.value);
+        }
+        yearSelect.addEventListener("change", refresh);
+        searchBox.addEventListener("input", () => {
+          // small debounce
+          window.clearTimeout(window.__t);
+          window.__t = window.setTimeout(refresh, 120);
+        });
+      });
+    })().catch(err => {
+      alert(err.message);
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
